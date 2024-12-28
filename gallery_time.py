@@ -1,9 +1,16 @@
 import os
 import re
+import sys
+import gi
 
-class GalleryTime:
+gi.require_version("Gtk", "4.0")
+from gi.repository import GLib, Gtk
+
+class GalleryTime(Gtk.Application):
     def __init__(self, base_path):
         print("Program Start\n")
+        super().__init__(application_id="com.example.GalleryTime")
+        GLib.set_application_name('Gallery Time')
         self.base_path = base_path
         self.images = []
         self.images_by_date = {} 
@@ -38,8 +45,22 @@ class GalleryTime:
                 self.images_by_date[year][month] = []
             self.images_by_date[year][month].append(image)
 
+    def do_activate(self):
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_title("Gallery Time")
+        window.set_default_size(800,600)
+
+        #Header
+        header = Gtk.HeaderBar()
+        header.set_show_title_buttons(True)
+        window.set_titlebar(header)
+
+        window.present()
+
 
 if __name__ == "__main__":
     photo_directory = "/home/filipe/Pictures/Fotos"
-    viewer = GalleryTime(photo_directory)
+    app = GalleryTime(photo_directory)
+    exit_status = app.run(sys.argv)
+    sys.exit(exit_status)
 
