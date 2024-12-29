@@ -4,7 +4,7 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+from gi.repository import GLib, Gtk, Gdk
 
 class GalleryTime(Gtk.Application):
     def __init__(self, base_path):
@@ -25,6 +25,11 @@ class GalleryTime(Gtk.Application):
 
     def is_valid(self, file):
         return file[0:2] == "20" and file[-1] != "4"
+
+    def get_relative_path(self, file):
+        year = file[2:4]
+        month = file[5:7]
+        return year + '/' + year + month + '/'
 
     def load_images(self):
         print("Loading Images\n")
@@ -55,11 +60,75 @@ class GalleryTime(Gtk.Application):
         header.set_show_title_buttons(True)
         window.set_titlebar(header)
 
+        # Load CSS
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_path("style.css")
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), 
+            css_provider, 
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+
+        #Scroll and main container
+        scroll = Gtk.ScrolledWindow()
+        window.set_child(scroll)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        scroll.set_child(main_box)
+
+        year = 2006
+        year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        year_label = Gtk.Label(label=str(year))
+        year_label.set_markup(f"<b>{year}</b>")
+        year_box.append(year_label)
+
+        month = 8
+        month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        month_label = Gtk.Label(label=f"{month:02d}")
+        month_label.set_markup(f"<i>{month:02d}</i>")
+        month_box.append(month_label)
+
+        image_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        
+        for i in range(9): 
+            image = self.images[i]
+            relative_path = self.get_relative_path(image)
+            image_path = os.path.join(self.base_path, relative_path ,image)
+            image_widget = Gtk.Image.new_from_file(image_path)
+            image_widget.get_style_context().add_class("image") 
+            image_box.append(image_widget)
+        month_box.append(image_box)
+        year_box.append(month_box)
+        main_box.append(year_box)
+
+        """
+        for year, months in self.images_by_date.items():
+            year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            year_label = Gtk.Label(label=str(year))
+            year_label.set_markup(f"<b>{year}</b>")
+            year_box.append(year_label)
+
+            for month, images in months.items():
+                month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+                month_label = Gtk.Label(label=f"{month:02d}")
+                month_label.set_markup(f"<i>{month:02d}</i>")
+                month_box.append(month_label)
+
+                for image in images:
+                    image_relative_path = self.get_relative_path(image)
+                    image_path = os.path.join(self.base_path, image)
+                    image_widget = Gtk.Image.new_from_file(image_path)
+                    month_box.append(image_widget)
+
+                year_box.append(month_box)
+            main_box.append(year_box)
+        """
         window.present()
 
 
 if __name__ == "__main__":
-    photo_directory = "/home/filipe/Pictures/Fotos"
+    photo_directory = "/home/filipe/Pictures/Fotos/"
     app = GalleryTime(photo_directory)
     exit_status = app.run(sys.argv)
     sys.exit(exit_status)
