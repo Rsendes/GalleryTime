@@ -1,6 +1,4 @@
 import os
-import re
-import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -21,30 +19,21 @@ month_names = {
     12: 'December'
 }
 
-class GalleryTime(Gtk.Application):
-    def __init__(self, base_path):
-        print("Program Start\n")
-        super().__init__(application_id="com.example.GalleryTime")
-        GLib.set_application_name('Gallery Time')
-        self.base_path = base_path
+class Gallery():
+    def __init__(self):
+        print("Program Start")
+        self.base_path = "/home/filipe/Pictures/Fotos"
         self.images = []
-        self.images_by_date = {} 
         self.load_images()
-        self.store_images_by_date()
+
+    def is_valid(self, file):
+        return file[0:2] == "20" and file[-1] != "4"
 
     def get_year(self, file):
         return int(file[:4])
 
     def get_month(self, file):
         return int(file[5:7])
-
-    def is_valid(self, file):
-        return file[0:2] == "20" and file[-1] != "4"
-
-    def get_relative_path(self, file):
-        year = file[2:4]
-        month = file[5:7]
-        return year + '/' + year + month + '/'
 
     def load_images(self):
         print("Loading Images\n")
@@ -53,86 +42,109 @@ class GalleryTime(Gtk.Application):
                 if self.is_valid(file): 
                     self.images.append(file)
         self.images.sort()
-    
-    def store_images_by_date(self):
-        print("Storing Images")
-        for image in self.images:
-            year = self.get_year(image)
-            if year not in self.images_by_date:
-                self.images_by_date[year] = {}
-            month = self.get_month(image)
-            if month not in self.images_by_date[year]:
-                self.images_by_date[year][month] = []
-            self.images_by_date[year][month].append(image)
 
-    def load_image(self, image_path):
-        try:
-            image_widget = Gtk.Image.new_from_file(image_path)
-            image_widget.get_style_context().add_class("image")
-            return image_widget
-        except Exception as e:
-            print(f"Failed to load image {image_path}: {e}")
-            return None
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__()
+        GLib.set_application_name("Gallery Time")
+        self.gallery = Gallery()
 
     def do_activate(self):
-        window = Gtk.ApplicationWindow(application=self)
-        window.set_title("Gallery Time")
-        window.set_default_size(800,600)
-
-        #Header
-        header = Gtk.HeaderBar()
-        header.set_show_title_buttons(True)
-        window.set_titlebar(header)
-
-        # Load CSS
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_path("style.css")
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), 
-            css_provider, 
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
-
-        #Scroll and main container
-        scroll = Gtk.ScrolledWindow()
-        window.set_child(scroll)
-
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        scroll.set_child(main_box)
- 
-        for year, months in self.images_by_date.items():
-            year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-            year_label = Gtk.Label(label=str(year))
-            year_label.set_markup(f"<b>{year}</b>")
-            year_box.append(year_label)
-
-            for month, images in months.items():
-                month_name = month_names[month] 
-                month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-                month_label = Gtk.Label(label=f"{month_name}")
-                month_label.set_markup(f"<i>{month_name}</i>")
-                month_box.append(month_label)
-
-                image_box = Gtk.FlowBox()
-                image_box.set_max_children_per_line(3)
-                image_box.set_selection_mode(Gtk.SelectionMode.NONE)
-
-                for image in images:
-                    relative_path = self.get_relative_path(image)
-                    image_path = os.path.join(self.base_path, relative_path ,image)
-                    image_widget = self.load_image(image_path)
-                        if image_widget:
-                            image_box.insert(image_widget, -1)
-
-                month_box.append(image_box)
-                year_box.append(month_box)
-            main_box.append(year_box)
+        """Called when the application is activated."""
+        window = MainWindow(self, self.gallery)
         window.present()
 
 
-if __name__ == "__main__":
-    photo_directory = "/home/filipe/Pictures/Fotos/"
-    app = GalleryTime(photo_directory)
-    exit_status = app.run(sys.argv)
-    sys.exit(exit_status)
+class MainWindow(Gtk.ApplicationWindow):
+    def __init__(self, app, gallery):
+        super().__init__(application=app)
+        self.set_title("Gallery Time")
+        self.set_default_size(800, 600)
 
+        # Header bar
+        header = Gtk.HeaderBar()
+        header.set_show_title_buttons(True)
+        self.set_titlebar(header)
+
+        # Load CSS
+        self.load_css()
+
+        # Scroll and main container
+        scroll = Gtk.ScrolledWindow()
+        self.set_child(scroll)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        scroll.set_child(main_box)
+
+        # First Year and Month
+        current_year = gallery.get_year(gallery.images[0]) 
+        current_month = gallery.get_month(gallery.images[0])
+        image_box, _ = self.new_year_month(main_box, None, gallery.images[0])
+
+        for image in gallery.images:
+            image_year = gallery.get_year(image)
+            image_month = gallery.get_month(image)
+            
+            # The year changes
+            if current_year != image_year:
+                current_year = image_year
+                image_box, year_box = self.new_year_month(main_box, None, image) 
+            # Only the month changes
+            elif current_month != image_month:
+                current_month = image_month
+                image_box, _ = self.new_year_month(main_box, year_box, image)
+
+            image_widget = Gtk.Image.new_from_file(image)
+            image_box.insert(image_widget, -1)
+            
+    def new_year_month(self, main_box, year_box, image):
+        if not year_box:
+            year_box = self.display_year(Gallery.get_year(None, image)) 
+            main_box.append(year_box)
+
+        month_box = self.display_month(Gallery.get_month(None, image))
+        image_box = self.create_image_box()
+        year_box.append(month_box)
+        month_box.append(image_box)
+        return image_box, year_box
+
+    def create_image_box(self):
+        image_box = Gtk.FlowBox()
+        image_box.set_max_children_per_line(3)
+        image_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        return image_box 
+
+    def display_year(self, year):
+        year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        year_label = Gtk.Label(label=str(year))
+        year_label.set_markup(f"<b>{year}</b>")
+        year_box.append(year_label)
+        return year_box
+
+    def display_month(self, month):
+        month_name = month_names[month] 
+        month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        month_label = Gtk.Label(label=f"{month_name}")
+        month_label.set_markup(f"<i>{month_name}</i>")
+        month_box.append(month_label)
+        return month_box
+
+    def load_css(self):
+        """Load CSS if available."""
+        css_path = "style.css"
+        if os.path.exists(css_path):
+            css_provider = Gtk.CssProvider()
+            css_provider.load_from_path(css_path)
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(),
+                css_provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+        else:
+            print("Warning: CSS file not found.")
+
+
+if __name__ == "__main__":
+    app = App()
+    app.run()
