@@ -43,6 +43,11 @@ class Gallery():
                     self.images.append(file)
         self.images.sort()
 
+    def get_full_path(self, file):
+        year = file[2:4]
+        month = file[5:7]
+        relative_path = year + '/' + year + month + '/'
+        return os.path.join(self.base_path, relative_path, file)
 
 class App(Gtk.Application):
     def __init__(self):
@@ -95,9 +100,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 current_month = image_month
                 image_box, _ = self.new_year_month(main_box, year_box, image)
 
-            image_widget = Gtk.Image.new_from_file(image)
+            image_path = gallery.get_full_path(image)
+            image_widget = Gtk.Image.new_from_file(image_path)
+            image_widget.get_style_context().add_class("image")
             image_box.insert(image_widget, -1)
-            
+
     def new_year_month(self, main_box, year_box, image):
         if not year_box:
             year_box = self.display_year(Gallery.get_year(None, image)) 
