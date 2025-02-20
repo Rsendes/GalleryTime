@@ -1,7 +1,7 @@
 import os
 import gi
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps, ExifTags
 
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Gdk
@@ -29,7 +29,6 @@ THUMBNAIL_SIZE = (300, 300)
 
 class Gallery():
     def __init__(self):
-        print("Program Start")
         self.images = []
         self.thumbnails = []
         self.load_images()
@@ -49,7 +48,6 @@ class Gallery():
         print("Loading Images\n")
         for root, dirs, files in  os.walk(BASE_PATH):
             if os.path.basename(root) == IGNORE_PATH:
-                print("Path Ignored")
                 continue  
             for file in files:
                 if self.is_valid(file): 
@@ -69,14 +67,28 @@ class Gallery():
             for image in self.images:
                 if image not in self.thumbnails:
                     self.create_thumbnail(image)
+            self.thumbnails.sort(reverse=True)
 
     def create_thumbnail(self, image):
         print("Creating thumbnail " + image)
         full_path = self.get_full_path(image)
         img = Image.open(full_path)
-        resized_img = img.resize(THUMBNAIL_SIZE)
+        exif = img._getexif()
+
+        if exif:
+            orientation = exif.get(274)  # 274 is the Orientation tag
+            if orientation == 6:
+                img = img.rotate(270, expand=True)
+            elif orientation == 8:
+                img = img.rotate(90, expand=True)
+            elif orientation == 3:
+                img = img.rotate(180, expand=True)
+
+        cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
         thumbnail_path = os.path.join(THUMBNAILS_PATH, image)
-        resized_img.save(thumbnail_path)
+        cropped_thumbnail.save(thumbnail_path)
+        self.thumbnails.append(image)
+
 
     def get_full_path(self, file):
         year = file[2:4]
@@ -189,7 +201,6 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         else:
             print("Warning: CSS file not found.")
-
 
 if __name__ == "__main__":
     app = App()

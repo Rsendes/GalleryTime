@@ -1,6 +1,9 @@
 Load Images to List
 Create a front end to display the images by month and year
     From more recent on top
-    Lazy Load
+
+TO DO:
+    Images in wrong orientation
+    Images streched in squares
 
     
