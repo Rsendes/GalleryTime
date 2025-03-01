@@ -89,7 +89,6 @@ class Gallery():
         cropped_thumbnail.save(thumbnail_path)
         self.thumbnails.append(image)
 
-
     def get_full_path(self, file):
         year = file[2:4]
         month = file[5:7]
@@ -98,6 +97,7 @@ class Gallery():
 
     def get_thumbnail_path(self, file):
         return os.path.join(THUMBNAILS_PATH, file)
+
 
 class App(Gtk.Application):
     def __init__(self):
@@ -157,11 +157,14 @@ class MainWindow(Gtk.ApplicationWindow):
             image_box.insert(image_widget, -1)
 
     def new_year_month(self, main_box, year_box, image):
+        year = Gallery.get_year(None, image)
+        month = Gallery.get_month(None, image)
+
         if not year_box:
-            year_box = self.display_year(Gallery.get_year(None, image)) 
+            year_box = self.display_year(year) 
             main_box.append(year_box)
 
-        month_box = self.display_month(Gallery.get_month(None, image))
+        month_box = self.display_month(month, year)
         image_box = self.create_image_box()
         year_box.append(month_box)
         month_box.append(image_box)
@@ -174,17 +177,19 @@ class MainWindow(Gtk.ApplicationWindow):
         return image_box 
 
     def display_year(self, year):
-        year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=50)
         year_label = Gtk.Label(label=str(year))
-        year_label.set_markup(f"<b>{year}</b>")
+        year_label.set_markup(f"<b><span size='20000'>-{year}-</span></b>")
         year_box.append(year_label)
         return year_box
 
-    def display_month(self, month):
+    def display_month(self, month, year):
         month_name = MONTH_NAMES[month] 
-        month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        month_label = Gtk.Label(label=f"{month_name}")
-        month_label.set_markup(f"<i>{month_name}</i>")
+        month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=25)
+        month_label = Gtk.Label(label=f"{month_name} {year}")
+        #month_box.set_margin_start(100)
+        month_label.set_markup(f"<b><span size='15000'>{month_name} {year}</span></b>")
+        #month_label.set_xalign(0)
         month_box.append(month_label)
         return month_box
 
@@ -201,6 +206,7 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         else:
             print("Warning: CSS file not found.")
+
 
 if __name__ == "__main__":
     app = App()
