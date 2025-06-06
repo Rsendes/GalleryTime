@@ -3,7 +3,6 @@ Create a front end to display the images by month and year
     From more recent on top
 
 TO DO:
-    Images in wrong orientation
-    Images streched in squares
-
+    Timeline and scroll on left
+    Display mp4 thumbnails
     

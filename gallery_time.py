@@ -1,5 +1,6 @@
 import os
 import gi
+import subprocess
 import numpy as np
 from PIL import Image, ImageOps, ExifTags
 
@@ -42,7 +43,7 @@ class Gallery():
         return int(file[:4])
 
     def get_month(self, file):
-        return int(file[5:7])
+        return int(file[4:6])
 
     def load_images(self):
         print("Loading Images\n")
@@ -90,10 +91,7 @@ class Gallery():
         self.thumbnails.append(image)
 
     def get_full_path(self, file):
-        year = file[2:4]
-        month = file[5:7]
-        relative_path = year + '/' + year + month + '/'
-        return os.path.join(BASE_PATH, relative_path, file)
+        return os.path.join(BASE_PATH,  file)
 
     def get_thumbnail_path(self, file):
         return os.path.join(THUMBNAILS_PATH, file)
@@ -152,9 +150,22 @@ class MainWindow(Gtk.ApplicationWindow):
                 image_box, _ = self.new_year_month(main_box, year_box, image)
 
             image_path = gallery.get_thumbnail_path(image)
+
             image_widget = Gtk.Image.new_from_file(image_path)
             image_widget.get_style_context().add_class("image")
+            
+            gesture = Gtk.GestureClick.new()
+            gesture.connect("pressed", self.on_image_clicked, image)
+            image_widget.add_controller(gesture)
+            
             image_box.insert(image_widget, -1)
+
+    def on_image_clicked(self, gesture, n_press, x, y, image):
+        full_path = Gallery.get_full_path(None, image)
+        try:
+            subprocess.Popen(["xdg-open", full_path])
+        except Exception as e:
+            print("Error opening image:", e)
 
     def new_year_month(self, main_box, year_box, image):
         year = Gallery.get_year(None, image)
@@ -187,9 +198,7 @@ class MainWindow(Gtk.ApplicationWindow):
         month_name = MONTH_NAMES[month] 
         month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=25)
         month_label = Gtk.Label(label=f"{month_name} {year}")
-        #month_box.set_margin_start(100)
         month_label.set_markup(f"<b><span size='15000'>{month_name} {year}</span></b>")
-        #month_label.set_xalign(0)
         month_box.append(month_label)
         return month_box
 
@@ -206,7 +215,6 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         else:
             print("Warning: CSS file not found.")
-
 
 if __name__ == "__main__":
     app = App()
