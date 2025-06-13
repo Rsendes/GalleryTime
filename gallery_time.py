@@ -1,7 +1,6 @@
 import os
 import gi
 import subprocess
-import numpy as np
 from PIL import Image, ImageOps, ExifTags
 
 gi.require_version("Gtk", "4.0")
@@ -123,17 +122,38 @@ class MainWindow(Gtk.ApplicationWindow):
         # Load CSS
         self.load_css()
 
+        # Main horizontal box: sidebar + scrollable main content
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.set_child(hbox)
+
+        # Sidebar with scroll
+        sidebar_scroll = Gtk.ScrolledWindow()
+        sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sidebar_scroll.set_size_request(180, -1)
+        hbox.append(sidebar_scroll)
+
+        self.sidebar = Gtk.ListBox()
+        self.sidebar.set_selection_mode(Gtk.SelectionMode.NONE)
+        sidebar_scroll.set_child(self.sidebar)
+
         # Scroll and main container
         scroll = Gtk.ScrolledWindow()
-        self.set_child(scroll)
+        scroll.set_hexpand(True)
+        hbox.append(scroll)
 
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        scroll.set_child(main_box)
+        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        scroll.set_child(self.main_box)
 
         # First Year and Month
         current_year = gallery.get_year(gallery.thumbnails[0]) 
         current_month = gallery.get_month(gallery.thumbnails[0])
-        image_box, year_box = self.new_year_month(main_box, None, gallery.thumbnails[0])
+        image_box, year_box = self.new_year_month(None, gallery.thumbnails[0])
+
+        year_row = self.sidebar_year(current_year)
+        self.sidebar.append(year_row)
+
+        month_row = self.sidebar_month(current_month)
+        self.sidebar.append(month_row)
 
         for image in gallery.thumbnails:
             image_year = gallery.get_year(image)
@@ -142,12 +162,18 @@ class MainWindow(Gtk.ApplicationWindow):
             # The year changes
             if current_year != image_year:
                 current_year = image_year
-                image_box, year_box = self.new_year_month(main_box, None, image) 
+                image_box, year_box = self.new_year_month(None, image)
+
+                year_row = self.sidebar_year(current_year)
+                self.sidebar.append(year_row)
             
             # Only the month changes
             elif current_month != image_month:
                 current_month = image_month
-                image_box, _ = self.new_year_month(main_box, year_box, image)
+                image_box, _ = self.new_year_month(year_box, image)
+
+                month_row = self.sidebar_month(current_month)
+                self.sidebar.append(month_row)
 
             image_path = gallery.get_thumbnail_path(image)
 
@@ -167,13 +193,13 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception as e:
             print("Error opening image:", e)
 
-    def new_year_month(self, main_box, year_box, image):
+    def new_year_month(self, year_box, image):
         year = Gallery.get_year(None, image)
         month = Gallery.get_month(None, image)
 
         if not year_box:
             year_box = self.display_year(year) 
-            main_box.append(year_box)
+            self.main_box.append(year_box)
 
         month_box = self.display_month(month, year)
         image_box = self.create_image_box()
@@ -201,6 +227,25 @@ class MainWindow(Gtk.ApplicationWindow):
         month_label.set_markup(f"<b><span size='15000'>{month_name} {year}</span></b>")
         month_box.append(month_label)
         return month_box
+    
+    def sidebar_year(self, year):
+        """Create a sidebar entry for the year."""
+        year_row = Gtk.ListBoxRow()
+        year_label = Gtk.Label(label=f"{year}")
+        year_label.set_xalign(0)
+        year_label.set_markup(f"<b>{year}</b>")
+        year_row.set_child(year_label)
+        return year_row
+    
+    def sidebar_month(self, month):
+        """Create a sidebar entry for the month."""
+        month_name = MONTH_NAMES[month]
+        month_row = Gtk.ListBoxRow()
+        month_label = Gtk.Label(label=f"{month_name}")
+        month_label.set_xalign(0)
+        month_label.set_markup(f"<i>{month_name}</i>")
+        month_row.set_child(month_label)
+        return month_row
 
     def load_css(self):
         """Load CSS if available."""
