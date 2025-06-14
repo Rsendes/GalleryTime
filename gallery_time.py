@@ -24,6 +24,7 @@ MONTH_NAMES = {
 BASE_PATH = "/home/filipe/Pictures/Fotos"
 THUMBNAILS_PATH = BASE_PATH + "/Thumbnails"
 IGNORE_PATH = "Thumbnails"
+ICONS_PATH = os.path.join(os.path.dirname(__file__), "icons")  # Add this line
 
 THUMBNAIL_SIZE = (300, 300)
 
@@ -38,7 +39,7 @@ class Gallery():
         self.create_thumbnails()
 
     def is_valid(self, file):
-        return file[0:2] == "20" and file[-1] != "4" and file[-3] != "3"
+        return file[0:2] == "20" and file[-3] != "3"
 
     def get_year(self, file):
         return int(file[:4])
@@ -67,29 +68,91 @@ class Gallery():
         if len(self.images) > len(self.thumbnails):
             print("Creating Thumbnails")
             for image in self.images:
-                if image not in self.thumbnails:
+                name, ext = os.path.splitext(image)
+                # Check for both regular image and video thumbnail
+                thumbnail_exists = (
+                    image in self.thumbnails or  # Regular image
+                    (ext.lower() == '.mp4' and f"{name}_video.jpg" in self.thumbnails)  # Video thumbnail
+                )
+                if not thumbnail_exists:
                     self.create_thumbnail(image)
             self.thumbnails.sort(reverse=True)
 
-    def create_thumbnail(self, image):
-        print("Creating thumbnail " + image)
-        full_path = self.get_full_path(image)
-        img = Image.open(full_path)
-        exif = img._getexif()
+    def create_thumbnail(self, file):
+        """Create thumbnail for both images and videos."""
+        full_path = self.get_full_path(file)
+        name, ext = os.path.splitext(file)
+        ext = ext.lower()
+        
+        # Set thumbnail path based on file type
+        if ext == '.mp4':
+            thumbnail_path = os.path.join(THUMBNAILS_PATH, f"{name}_video.jpg")
+            print(f"Creating thumbnail for video {file} -> {name}_video.jpg")
+        else:
+            thumbnail_path = os.path.join(THUMBNAILS_PATH, file)
+            print(f"Creating thumbnail for image {file}")
+        
+        # Process based on file type
+        if ext == '.mp4':
+            try:
+                # ...existing video thumbnail code...
+                subprocess.run([
+                    'ffmpeg',
+                    '-i', full_path,
+                    '-vframes', '1',
+                    '-an',
+                    '-ss', '0',
+                    '-y',
+                    '-f', 'image2',
+                    thumbnail_path
+                ], check=True, capture_output=True)
+                
+                # Create thumbnail with video icon
+                img = Image.open(thumbnail_path)
+                cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                
+                # Open and resize video icon
+                icon = Image.open(os.path.join(ICONS_PATH, "video-icon.png"))
+                icon_size = (32, 32)
+                icon = icon.resize(icon_size)
+                
+                # Calculate position for bottom-right corner with margin
+                icon_x = THUMBNAIL_SIZE[0] - icon_size[0] - 20
+                icon_y = THUMBNAIL_SIZE[1] - icon_size[1] - 20
+                
+                # Paste icon onto thumbnail
+                if icon.mode == 'RGBA':
+                    cropped_thumbnail.paste(icon, (icon_x, icon_y), icon)
+                else:
+                    cropped_thumbnail.paste(icon, (icon_x, icon_y))
+                
+                cropped_thumbnail.save(thumbnail_path)
+                self.thumbnails.append(f"{name}_video.jpg")
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Error creating video thumbnail for {file}: {e.stderr.decode()}")
+            except Exception as e:
+                print(f"Error processing video thumbnail for {file}: {e}")
+        else:
+            # Handle image thumbnail
+            try:
+                img = Image.open(full_path)
+                exif = img._getexif()
 
-        if exif:
-            orientation = exif.get(274)  # 274 is the Orientation tag
-            if orientation == 6:
-                img = img.rotate(270, expand=True)
-            elif orientation == 8:
-                img = img.rotate(90, expand=True)
-            elif orientation == 3:
-                img = img.rotate(180, expand=True)
+                if exif:
+                    orientation = exif.get(274)
+                    if orientation == 6:
+                        img = img.rotate(270, expand=True)
+                    elif orientation == 8:
+                        img = img.rotate(90, expand=True)
+                    elif orientation == 3:
+                        img = img.rotate(180, expand=True)
 
-        cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
-        thumbnail_path = os.path.join(THUMBNAILS_PATH, image)
-        cropped_thumbnail.save(thumbnail_path)
-        self.thumbnails.append(image)
+                cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                cropped_thumbnail.save(thumbnail_path)
+                self.thumbnails.append(file)
+            except Exception as e:
+                print(f"Error creating image thumbnail for {file}: {e}")
 
     def get_full_path(self, file):
         return os.path.join(BASE_PATH,  file)
@@ -119,6 +182,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.gallery = gallery
         self.month_labels = {}
         self.year_labels = {}
+
+        # Cache video icon
+        self.video_icon = Gtk.Image.new_from_file(os.path.join(ICONS_PATH, "video-icon.png"))
+        self.video_icon.set_size_request(64, 64)
 
         # Header bar
         header = Gtk.HeaderBar()
@@ -221,30 +288,51 @@ class MainWindow(Gtk.ApplicationWindow):
     def add_image_to_box(self, image_box, image, gallery):
         """Add an image to the specified image box with proper error handling."""
         try:
+            container = Gtk.Overlay()
+            
+            # Add main image
             image_path = gallery.get_thumbnail_path(image)
             image_widget = Gtk.Image.new_from_file(image_path)
             image_widget.get_style_context().add_class("image")
+            container.set_child(image_widget)
             
             gesture = Gtk.GestureClick.new()
             gesture.connect("pressed", self.on_image_clicked, image)
-            image_widget.add_controller(gesture)
+            container.add_controller(gesture)
             
-            image_box.insert(image_widget, -1)
+            image_box.insert(container, -1)
         except Exception as e:
             print(f"Error adding image {image}: {e}")
 
     def on_image_clicked(self, gesture, n_press, x, y, image):
-        """Handle image click by opening it in the default image viewer."""
+        """Handle image/video click by opening in the default viewer."""
         try:
-            full_path = self.gallery.get_full_path(image)
-            #print image year and month
-            year = self.gallery.get_year(image)
-            month = self.gallery.get_month(image)
-            day = image[6:8]  # Assuming the format is YYYYMMDD
-            print(f"Opening image:(Year: {year}, Month: {month} Day: {day})")
-            subprocess.Popen(["xdg-open", full_path])
+            name, ext = os.path.splitext(image)
+            
+            # Check if this is a video thumbnail
+            if name.endswith('_video'):
+                # Remove _video suffix and add .mp4 extension
+                original_name = name[:-6] + '.mp4'
+                full_path = self.gallery.get_full_path(original_name)
+            else:
+                full_path = self.gallery.get_full_path(image)
+
+            # Get clean name for year/month/day (remove _video if present)
+            clean_name = name[:-6] if name.endswith('_video') else name
+            year = self.gallery.get_year(clean_name)
+            month = self.gallery.get_month(clean_name)
+            day = clean_name[6:8]
+            print(f"Opening file: (Year: {year}, Month: {month} Day: {day})")
+            
+            # Open file with system default application, redirecting output to /dev/null
+            with open(os.devnull, 'w') as devnull:
+                subprocess.Popen(
+                    ["xdg-open", full_path],
+                    stdout=devnull,
+                    stderr=devnull
+                )
         except Exception as e:
-            print(f"Error opening image {image}: {e}")
+            print(f"Error opening file {image}: {e}")
 
     def get_month_key(self, year, month):
         """Create a consistent key for the month_labels dictionary."""
