@@ -27,6 +27,8 @@ IGNORE_PATH = "Thumbnails"
 
 THUMBNAIL_SIZE = (300, 300)
 
+SCROLL_OFFSET = 60
+
 class Gallery():
     def __init__(self):
         self.images = []
@@ -114,6 +116,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title("Gallery Time")
         self.set_default_size(800, 600)
 
+        self.gallery = gallery
+        self.month_labels = {}
+        self.year_labels = {}
+
         # Header bar
         header = Gtk.HeaderBar()
         header.set_show_title_buttons(True)
@@ -137,46 +143,85 @@ class MainWindow(Gtk.ApplicationWindow):
         sidebar_scroll.set_child(self.sidebar)
 
         # Scroll and main container
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_hexpand(True)
-        hbox.append(scroll)
+        self.scroll = Gtk.ScrolledWindow()
+        self.scroll.set_hexpand(True)
+        hbox.append(self.scroll)
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        scroll.set_child(self.main_box)
+        self.scroll.set_child(self.main_box)
 
-        # First Year and Month
-        current_year = gallery.get_year(gallery.thumbnails[0]) 
+        # Initialize the gallery view
+        self.initialize_gallery(gallery)
+
+    def initialize_gallery(self, gallery):
+        """Initialize the gallery view with the first image and process all images."""
+        # Initialize with first image
+        current_year = gallery.get_year(gallery.thumbnails[0])
         current_month = gallery.get_month(gallery.thumbnails[0])
-        image_box, year_box = self.new_year_month(None, gallery.thumbnails[0])
+        
+        # Create initial year and month containers
+        year_box = self.create_year_container(current_year)
+        month_box = self.create_month_container(current_month, current_year, year_box)
+        image_box = self.create_image_box()
+        month_box.append(image_box)
 
-        year_row = self.sidebar_year(current_year)
-        self.sidebar.append(year_row)
-
-        month_row = self.sidebar_month(current_month)
-        self.sidebar.append(month_row)
-
+        # Process all images
         for image in gallery.thumbnails:
             image_year = gallery.get_year(image)
             image_month = gallery.get_month(image)
 
-            # The year changes
             if current_year != image_year:
+                # Handle year change
                 current_year = image_year
-                image_box, year_box = self.new_year_month(None, image)
-
-                year_row = self.sidebar_year(current_year)
-                self.sidebar.append(year_row)
-            
-            # Only the month changes
-            elif current_month != image_month:
                 current_month = image_month
-                image_box, _ = self.new_year_month(year_box, image)
+                year_box = self.create_year_container(current_year)
+                month_box = self.create_month_container(current_month, current_year, year_box)
+                image_box = self.create_image_box()
+                month_box.append(image_box)
+            elif current_month != image_month:
+                # Handle month change
+                current_month = image_month
+                month_box = self.create_month_container(current_month, current_year, year_box)
+                image_box = self.create_image_box()
+                month_box.append(image_box)
 
-                month_row = self.sidebar_month(current_month)
-                self.sidebar.append(month_row)
+            # Add image to current image box
+            self.add_image_to_box(image_box, image, gallery)
 
+    def create_year_container(self, year):
+        """Create a year container and add it to both main view and sidebar."""
+        year_box = self.create_year_box(year)
+        self.main_box.append(year_box)
+        
+        year_row = self.create_year_row(year)
+        self.sidebar.append(year_row)
+
+        # Add click handler to year in sidebar
+        gesture = Gtk.GestureClick.new()
+        gesture.connect("pressed", self.on_year_clicked, year)
+        year_row.add_controller(gesture)
+        
+        return year_box
+
+    def create_month_container(self, month, year, year_box):
+        """Create a month container and add it to both main view and sidebar."""
+        month_box = self.create_month_box(month, year)
+        year_box.append(month_box)
+        
+        month_row = self.create_month_row(month)
+        self.sidebar.append(month_row)
+        
+        # Add click handler to month in sidebar
+        gesture = Gtk.GestureClick.new()
+        gesture.connect("pressed", self.on_month_clicked, month, year)
+        month_row.add_controller(gesture)
+        
+        return month_box
+
+    def add_image_to_box(self, image_box, image, gallery):
+        """Add an image to the specified image box with proper error handling."""
+        try:
             image_path = gallery.get_thumbnail_path(image)
-
             image_widget = Gtk.Image.new_from_file(image_path)
             image_widget.get_style_context().add_class("image")
             
@@ -185,27 +230,46 @@ class MainWindow(Gtk.ApplicationWindow):
             image_widget.add_controller(gesture)
             
             image_box.insert(image_widget, -1)
+        except Exception as e:
+            print(f"Error adding image {image}: {e}")
 
     def on_image_clicked(self, gesture, n_press, x, y, image):
-        full_path = Gallery.get_full_path(None, image)
+        """Handle image click by opening it in the default image viewer."""
         try:
+            full_path = self.gallery.get_full_path(image)
+            #print image year and month
+            year = self.gallery.get_year(image)
+            month = self.gallery.get_month(image)
+            day = image[6:8]  # Assuming the format is YYYYMMDD
+            print(f"Opening image:(Year: {year}, Month: {month} Day: {day})")
             subprocess.Popen(["xdg-open", full_path])
         except Exception as e:
-            print("Error opening image:", e)
+            print(f"Error opening image {image}: {e}")
 
-    def new_year_month(self, year_box, image):
-        year = Gallery.get_year(None, image)
-        month = Gallery.get_month(None, image)
+    def get_month_key(self, year, month):
+        """Create a consistent key for the month_labels dictionary."""
+        return f"{year}{month:02d}"
 
-        if not year_box:
-            year_box = self.display_year(year) 
-            self.main_box.append(year_box)
+    def on_month_clicked(self, gesture, n_press, x, y, month, year):
+        """Handle month click events by scrolling to the month's position."""
+        try:
+            key = self.get_month_key(year, month)
+            month_label = self.month_labels[key]
+            vadjustment = self.scroll.get_vadjustment()
+            (_, y) = month_label.translate_coordinates(self, 0, vadjustment.get_value())
+            vadjustment.set_value(y - SCROLL_OFFSET)
+        except Exception as e:
+            print(f"Error scrolling to month: {e}")
 
-        month_box = self.display_month(month, year)
-        image_box = self.create_image_box()
-        year_box.append(month_box)
-        month_box.append(image_box)
-        return image_box, year_box
+    def on_year_clicked(self, gesture, n_press, x, y, year):
+        """Handle year click events by scrolling to the year's position."""
+        try:
+            year_label = self.year_labels[year]
+            vadjustment = self.scroll.get_vadjustment()
+            (_, y) = year_label.translate_coordinates(self, 0, vadjustment.get_value())
+            vadjustment.set_value(y - SCROLL_OFFSET)
+        except Exception as e:
+            print(f"Error scrolling to year: {e}")
 
     def create_image_box(self):
         image_box = Gtk.FlowBox()
@@ -213,36 +277,47 @@ class MainWindow(Gtk.ApplicationWindow):
         image_box.set_selection_mode(Gtk.SelectionMode.NONE)
         return image_box 
 
-    def display_year(self, year):
+    def create_year_box(self, year):
         year_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=50)
         year_label = Gtk.Label(label=str(year))
         year_label.set_markup(f"<b><span size='20000'>-{year}-</span></b>")
         year_box.append(year_label)
+
+        # Store the label for scroll navigation
+        self.year_labels[year] = year_label
+
         return year_box
 
-    def display_month(self, month, year):
+    def create_month_box(self, month, year):
+        """Create and return a month container with its label."""
         month_name = MONTH_NAMES[month] 
         month_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=25)
         month_label = Gtk.Label(label=f"{month_name} {year}")
         month_label.set_markup(f"<b><span size='15000'>{month_name} {year}</span></b>")
         month_box.append(month_label)
+        
+        # Store the label for scroll navigation
+        key = self.get_month_key(year, month)
+        self.month_labels[key] = month_label
         return month_box
     
-    def sidebar_year(self, year):
+    def create_year_row(self, year):
         """Create a sidebar entry for the year."""
         year_row = Gtk.ListBoxRow()
         year_label = Gtk.Label(label=f"{year}")
         year_label.set_xalign(0)
+        year_label.set_margin_start(10)
         year_label.set_markup(f"<b>{year}</b>")
         year_row.set_child(year_label)
         return year_row
     
-    def sidebar_month(self, month):
+    def create_month_row(self, month):
         """Create a sidebar entry for the month."""
         month_name = MONTH_NAMES[month]
         month_row = Gtk.ListBoxRow()
         month_label = Gtk.Label(label=f"{month_name}")
         month_label.set_xalign(0)
+        month_label.set_margin_start(10)
         month_label.set_markup(f"<i>{month_name}</i>")
         month_row.set_child(month_label)
         return month_row
