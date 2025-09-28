@@ -28,6 +28,8 @@ ICONS_PATH = os.path.join(os.path.dirname(__file__), "icons")  # Add this line
 
 THUMBNAIL_SIZE = (300, 300)
 
+ICON_SIZE = (32, 32)
+
 SCROLL_OFFSET = 60
 
 class Gallery():
@@ -46,6 +48,15 @@ class Gallery():
 
     def get_month(self, file):
         return int(file[4:6])
+
+    def is_video(self, ext):
+        return ext == '.mp4'
+
+    def get_full_path(self, file):
+        return os.path.join(BASE_PATH,  file)
+
+    def get_thumbnail_path(self, file):
+        return os.path.join(THUMBNAILS_PATH, file)
 
     def load_images(self):
         print("Loading Images\n")
@@ -83,82 +94,65 @@ class Gallery():
         full_path = self.get_full_path(file)
         name, ext = os.path.splitext(file)
         ext = ext.lower()
-        
-        # Set thumbnail path based on file type
-        if ext == '.mp4':
-            thumbnail_path = os.path.join(THUMBNAILS_PATH, f"{name}_video.jpg")
-            print(f"Creating thumbnail for video {file} -> {name}_video.jpg")
+
+        if self.is_video(ext):
+            self.create_video_thumbnail(full_path, name, file)
         else:
-            thumbnail_path = os.path.join(THUMBNAILS_PATH, file)
-            print(f"Creating thumbnail for image {file}")
-        
-        # Process based on file type
-        if ext == '.mp4':
-            try:
-                # ...existing video thumbnail code...
-                subprocess.run([
-                    'ffmpeg',
-                    '-i', full_path,
-                    '-vframes', '1',
-                    '-an',
-                    '-ss', '0',
-                    '-y',
-                    '-f', 'image2',
-                    thumbnail_path
-                ], check=True, capture_output=True)
-                
-                # Create thumbnail with video icon
-                img = Image.open(thumbnail_path)
-                cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
-                
-                # Open and resize video icon
-                icon = Image.open(os.path.join(ICONS_PATH, "video-icon.png"))
-                icon_size = (32, 32)
-                icon = icon.resize(icon_size)
-                
-                # Calculate position for bottom-right corner with margin
-                icon_x = THUMBNAIL_SIZE[0] - icon_size[0] - 20
-                icon_y = THUMBNAIL_SIZE[1] - icon_size[1] - 20
-                
-                # Paste icon onto thumbnail
-                if icon.mode == 'RGBA':
-                    cropped_thumbnail.paste(icon, (icon_x, icon_y), icon)
-                else:
-                    cropped_thumbnail.paste(icon, (icon_x, icon_y))
-                
-                cropped_thumbnail.save(thumbnail_path)
-                self.thumbnails.append(f"{name}_video.jpg")
-                
-            except subprocess.CalledProcessError as e:
-                print(f"Error creating video thumbnail for {file}: {e.stderr.decode()}")
-            except Exception as e:
-                print(f"Error processing video thumbnail for {file}: {e}")
-        else:
-            # Handle image thumbnail
-            try:
-                img = Image.open(full_path)
-                exif = img._getexif()
+            self.create_image_thumbnail(full_path, name, file)
 
-                if exif:
-                    orientation = exif.get(274)
-                    if orientation == 6:
-                        img = img.rotate(270, expand=True)
-                    elif orientation == 8:
-                        img = img.rotate(90, expand=True)
-                    elif orientation == 3:
-                        img = img.rotate(180, expand=True)
+    def create_video_thumbnail(self, full_path, name, file):
+        thumbnail_path = os.path.join(THUMBNAILS_PATH, f"{name}_video.jpg")
+        print(f"Creating thumbnail for video {file} -> {name}_video.jpg")
+        try:
+            subprocess.run(['ffmpeg', '-i', full_path, '-vframes', '1', '-an',
+                            '-ss', '0', '-y','-f', 'image2', thumbnail_path], 
+                           check=True, capture_output=True)
 
-                cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
-                cropped_thumbnail.save(thumbnail_path)
-                self.thumbnails.append(file)
-            except Exception as e:
-                print(f"Error creating image thumbnail for {file}: {e}")
+            # Create thumbnail with video icon
+            img = Image.open(thumbnail_path)
+            cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
 
-    def get_full_path(self, file):
-        return os.path.join(BASE_PATH,  file)
+            # Open and resize video icon
+            icon = Image.open(os.path.join(ICONS_PATH, "video-icon.png"))
+            icon = icon.resize(ICON_SIZE)
 
-    def get_thumbnail_path(self, file):
-        return os.path.join(THUMBNAILS_PATH, file)
+            # Calculate position for bottom-right corner with margin
+            icon_x = THUMBNAIL_SIZE[0] - ICON_SIZE[0] - 20
+            icon_y = THUMBNAIL_SIZE[1] - ICON_SIZE[1] - 20
+
+            # Paste icon onto thumbnail
+            if icon.mode == 'RGBA':
+                cropped_thumbnail.paste(icon, (icon_x, icon_y), icon)
+            else:
+                cropped_thumbnail.paste(icon, (icon_x, icon_y))
+
+            cropped_thumbnail.save(thumbnail_path)
+            self.thumbnails.append(f"{name}_video.jpg")
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating video thumbnail for {file}: {e.stderr.decode()}")
+        except Exception as e:
+            print(f"Error processing video thumbnail for {file}: {e}")
+
+    def create_image_thumbnail(self, full_path, name, file):
+        thumbnail_path = os.path.join(THUMBNAILS_PATH, file)
+        print(f"Creating thumbnail for image {file}")
+        try:
+            img = Image.open(full_path)
+            exif = img._getexif()
+            if exif:
+                orientation = exif.get(274)
+                if orientation == 6:
+                    img = img.rotate(270, expand=True)
+                elif orientation == 8:
+                    img = img.rotate(90, expand=True)
+                elif orientation == 3:
+                    img = img.rotate(180, expand=True)
+            cropped_thumbnail = ImageOps.fit(img, THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+            cropped_thumbnail.save(thumbnail_path)
+            self.thumbnails.append(file)
+        except Exception as e:
+            print(f"Error creating image thumbnail for {file}: {e}")
 
 
 class App(Gtk.Application):
@@ -192,9 +186,6 @@ class MainWindow(Gtk.ApplicationWindow):
         header.set_show_title_buttons(True)
         self.set_titlebar(header)
 
-        # Load CSS
-        self.load_css()
-
         # Main horizontal box: sidebar + scrollable main content
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self.set_child(hbox)
@@ -225,7 +216,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Initialize with first image
         current_year = gallery.get_year(gallery.thumbnails[0])
         current_month = gallery.get_month(gallery.thumbnails[0])
-        
+
         # Create initial year and month containers
         year_box = self.create_year_container(current_year)
         month_box = self.create_month_container(current_month, current_year, year_box)
@@ -252,14 +243,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 image_box = self.create_image_box()
                 month_box.append(image_box)
 
-            # Add image to current image box
             self.add_image_to_box(image_box, image, gallery)
 
     def create_year_container(self, year):
         """Create a year container and add it to both main view and sidebar."""
         year_box = self.create_year_box(year)
         self.main_box.append(year_box)
-        
+
         year_row = self.create_year_row(year)
         self.sidebar.append(year_row)
 
@@ -267,40 +257,45 @@ class MainWindow(Gtk.ApplicationWindow):
         gesture = Gtk.GestureClick.new()
         gesture.connect("pressed", self.on_year_clicked, year)
         year_row.add_controller(gesture)
-        
+
         return year_box
 
     def create_month_container(self, month, year, year_box):
         """Create a month container and add it to both main view and sidebar."""
         month_box = self.create_month_box(month, year)
         year_box.append(month_box)
-        
+
         month_row = self.create_month_row(month)
         self.sidebar.append(month_row)
-        
-        # Add click handler to month in sidebar
+
         gesture = Gtk.GestureClick.new()
         gesture.connect("pressed", self.on_month_clicked, month, year)
         month_row.add_controller(gesture)
-        
+
         return month_box
 
     def add_image_to_box(self, image_box, image, gallery):
         """Add an image to the specified image box with proper error handling."""
         try:
             container = Gtk.Overlay()
-            
+
+            container.set_size_request(THUMBNAIL_SIZE[0], THUMBNAIL_SIZE[1])
+
             # Add main image
             image_path = gallery.get_thumbnail_path(image)
             image_widget = Gtk.Image.new_from_file(image_path)
-            image_widget.get_style_context().add_class("image")
+
+            image_widget.set_hexpand(True)
+            image_widget.set_vexpand(True)
+            image_widget.set_pixel_size(THUMBNAIL_SIZE[0]) 
+
             container.set_child(image_widget)
-            
+
             gesture = Gtk.GestureClick.new()
             gesture.connect("pressed", self.on_image_clicked, image)
             container.add_controller(gesture)
-            
             image_box.insert(container, -1)
+
         except Exception as e:
             print(f"Error adding image {image}: {e}")
 
@@ -308,7 +303,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle image/video click by opening in the default viewer."""
         try:
             name, ext = os.path.splitext(image)
-            
+
             # Check if this is a video thumbnail
             if name.endswith('_video'):
                 # Remove _video suffix and add .mp4 extension
@@ -323,7 +318,7 @@ class MainWindow(Gtk.ApplicationWindow):
             month = self.gallery.get_month(clean_name)
             day = clean_name[6:8]
             print(f"Opening file: (Year: {year}, Month: {month} Day: {day})")
-            
+
             # Open file with system default application, redirecting output to /dev/null
             with open(os.devnull, 'w') as devnull:
                 subprocess.Popen(
@@ -383,12 +378,12 @@ class MainWindow(Gtk.ApplicationWindow):
         month_label = Gtk.Label(label=f"{month_name} {year}")
         month_label.set_markup(f"<b><span size='15000'>{month_name} {year}</span></b>")
         month_box.append(month_label)
-        
+
         # Store the label for scroll navigation
         key = self.get_month_key(year, month)
         self.month_labels[key] = month_label
         return month_box
-    
+
     def create_year_row(self, year):
         """Create a sidebar entry for the year."""
         year_row = Gtk.ListBoxRow()
@@ -398,7 +393,7 @@ class MainWindow(Gtk.ApplicationWindow):
         year_label.set_markup(f"<b>{year}</b>")
         year_row.set_child(year_label)
         return year_row
-    
+
     def create_month_row(self, month):
         """Create a sidebar entry for the month."""
         month_name = MONTH_NAMES[month]
@@ -409,20 +404,6 @@ class MainWindow(Gtk.ApplicationWindow):
         month_label.set_markup(f"<i>{month_name}</i>")
         month_row.set_child(month_label)
         return month_row
-
-    def load_css(self):
-        """Load CSS if available."""
-        css_path = "style.css"
-        if os.path.exists(css_path):
-            css_provider = Gtk.CssProvider()
-            css_provider.load_from_path(css_path)
-            Gtk.StyleContext.add_provider_for_display(
-                Gdk.Display.get_default(),
-                css_provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-            )
-        else:
-            print("Warning: CSS file not found.")
 
 if __name__ == "__main__":
     app = App()
