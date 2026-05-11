@@ -1,6 +1,16 @@
 import os
 import gi
 import subprocess
+import argparse
+import base64
+import logging
+import posixpath
+import sys
+import threading
+import traceback
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from PIL import Image, ImageOps, ExifTags
 
 gi.require_version("Gtk", "4.0")
@@ -21,8 +31,11 @@ MONTH_NAMES = {
     12: 'December'
 }
 
-BASE_PATH = "/home/filipe/Pictures/Fotos"
-THUMBNAILS_PATH = BASE_PATH + "/Thumbnails"
+DEFAULT_BASE_PATH = "/home/filipe/Pictures/Fotos"
+APP_CACHE_PATH = os.path.join(GLib.get_user_cache_dir(), "gallery-time")
+LOG_PATH = os.path.join(APP_CACHE_PATH, "gallery-time.log")
+DEFAULT_THUMBNAILS_PATH = os.path.join(APP_CACHE_PATH, "thumbnails")
+DEFAULT_DOWNLOADS_PATH = os.path.join(APP_CACHE_PATH, "originals")
 IGNORE_PATH = "Thumbnails"
 ICONS_PATH = os.path.join(os.path.dirname(__file__), "icons")  # Add this line
 
@@ -32,16 +45,166 @@ ICON_SIZE = (32, 32)
 
 SCROLL_OFFSET = 60
 
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff'}
+VIDEO_EXTENSIONS = {'.mp4'}
+SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+
+
+def setup_logging():
+    os.makedirs(APP_CACHE_PATH, exist_ok=True)
+    handlers = [logging.StreamHandler(sys.stdout)]
+    try:
+        handlers.insert(0, logging.FileHandler(LOG_PATH))
+    except OSError as error:
+        print(f"Could not write log file {LOG_PATH}: {error}", file=sys.stderr)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Browse a timeline gallery from a local path or Nextcloud.")
+    parser.add_argument(
+        "--base-path",
+        default=os.environ.get("GALLERY_TIME_BASE_PATH", DEFAULT_BASE_PATH),
+        help="Local folder to scan. This can be a server path mounted with NFS, SMB, sshfs, davfs, or GVFS.",
+    )
+    parser.add_argument(
+        "--thumbnail-path",
+        default=os.environ.get("GALLERY_TIME_THUMBNAILS_PATH"),
+        help="Folder where generated thumbnails are stored.",
+    )
+    parser.add_argument(
+        "--nextcloud-url",
+        default=os.environ.get("GALLERY_TIME_NEXTCLOUD_URL"),
+        help="Nextcloud WebDAV folder URL, for example https://cloud.example.com/remote.php/dav/files/user/Photos/",
+    )
+    parser.add_argument(
+        "--nextcloud-user",
+        default=os.environ.get("GALLERY_TIME_NEXTCLOUD_USER"),
+        help="Nextcloud username for WebDAV.",
+    )
+    parser.add_argument(
+        "--nextcloud-password",
+        default=os.environ.get("GALLERY_TIME_NEXTCLOUD_PASSWORD"),
+        help="Nextcloud app password for WebDAV. Prefer the environment variable.",
+    )
+    parser.add_argument(
+        "--download-path",
+        default=os.environ.get("GALLERY_TIME_DOWNLOAD_PATH", DEFAULT_DOWNLOADS_PATH),
+        help="Local cache folder for files downloaded from Nextcloud.",
+    )
+    return parser.parse_args()
+
+
+class LocalImageSource:
+    def __init__(self, base_path):
+        self.base_path = os.path.abspath(os.path.expanduser(base_path))
+
+    def list_files(self):
+        files = []
+        for root, dirs, filenames in os.walk(self.base_path):
+            dirs[:] = [d for d in dirs if d != IGNORE_PATH]
+            for filename in filenames:
+                files.append((filename, os.path.join(root, filename)))
+        return files
+
+    def get_local_path(self, file, source_path):
+        return source_path
+
+
+class NextcloudImageSource:
+    def __init__(self, url, username, password, download_path):
+        if not username or not password:
+            raise ValueError("Nextcloud mode requires --nextcloud-user and --nextcloud-password.")
+        self.url = url.rstrip("/") + "/"
+        self.username = username
+        self.password = password
+        self.download_path = os.path.abspath(os.path.expanduser(download_path))
+        os.makedirs(self.download_path, exist_ok=True)
+
+    def _request(self, url, method="GET", headers=None):
+        headers = headers or {}
+        token = base64.b64encode(f"{self.username}:{self.password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+        request = urllib.request.Request(url, method=method, headers=headers)
+        return urllib.request.urlopen(request)
+
+    def list_files(self):
+        body = """<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop><d:resourcetype /></d:prop>
+</d:propfind>""".encode("utf-8")
+        headers = {"Depth": "infinity", "Content-Type": "application/xml"}
+        token = base64.b64encode(f"{self.username}:{self.password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+        request = urllib.request.Request(self.url, data=body, method="PROPFIND", headers=headers)
+        with urllib.request.urlopen(request) as response:
+            xml_data = response.read()
+
+        namespace = {"d": "DAV:"}
+        root = ET.fromstring(xml_data)
+        base_path = urllib.parse.urlparse(self.url).path.rstrip("/") + "/"
+        files = []
+        for item in root.findall("d:response", namespace):
+            href = item.findtext("d:href", namespaces=namespace)
+            resource_type = item.find(".//d:resourcetype", namespace)
+            is_collection = resource_type is not None and resource_type.find("d:collection", namespace) is not None
+            if not href or is_collection:
+                continue
+
+            path = urllib.parse.unquote(urllib.parse.urlparse(href).path)
+            if not path.startswith(base_path):
+                continue
+            relative_path = path[len(base_path):]
+            filename = posixpath.basename(relative_path)
+            files.append((filename, urllib.parse.urljoin(self.url, urllib.parse.quote(relative_path, safe="/"))))
+        return files
+
+    def get_local_path(self, file, source_url):
+        local_path = os.path.join(self.download_path, file)
+        if os.path.exists(local_path):
+            return local_path
+
+        logging.info("Downloading %s", file)
+        with self._request(source_url) as response, open(local_path, "wb") as destination:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+        return local_path
+
+
 class Gallery():
-    def __init__(self):
+    def __init__(self, image_source, thumbnails_path, progress_callback=None):
+        self.image_source = image_source
+        self.thumbnails_path = os.path.abspath(os.path.expanduser(thumbnails_path))
+        os.makedirs(self.thumbnails_path, exist_ok=True)
+        self.progress_callback = progress_callback
         self.images = []
+        self.image_sources = {}
         self.thumbnails = []
         self.load_images()
         self.load_thumbnails()
         self.create_thumbnails()
 
+    def report(self, message, current=None, total=None):
+        logging.info(message)
+        if self.progress_callback:
+            self.progress_callback(message, current, total)
+
     def is_valid(self, file):
-        return file[0:2] == "20" and file[-3] != "3"
+        name, ext = os.path.splitext(file)
+        return (
+            len(name) >= 6
+            and name[:6].isdigit()
+            and name[:2] == "20"
+            and ext.lower() in SUPPORTED_EXTENSIONS
+        )
 
     def get_year(self, file):
         return int(file[:4])
@@ -50,44 +213,65 @@ class Gallery():
         return int(file[4:6])
 
     def is_video(self, ext):
-        return ext == '.mp4'
+        return ext.lower() in VIDEO_EXTENSIONS
 
     def get_full_path(self, file):
-        return os.path.join(BASE_PATH,  file)
+        source_path = self.image_sources[file]
+        return self.image_source.get_local_path(file, source_path)
 
     def get_thumbnail_path(self, file):
-        return os.path.join(THUMBNAILS_PATH, file)
+        return os.path.join(self.thumbnails_path, file)
+
+    def get_original_file_for_thumbnail(self, thumbnail):
+        name, ext = os.path.splitext(thumbnail)
+        if name.endswith('_video'):
+            return name[:-6] + '.mp4'
+        return thumbnail
 
     def load_images(self):
-        print("Loading Images\n")
-        for root, dirs, files in  os.walk(BASE_PATH):
-            if os.path.basename(root) == IGNORE_PATH:
-                continue  
-            for file in files:
-                if self.is_valid(file): 
-                    self.images.append(file)
+        self.report("Loading images...")
+        for file, source_path in self.image_source.list_files():
+            if self.is_valid(file):
+                if file in self.image_sources:
+                    self.report(f"Skipping duplicate file name: {file}")
+                    continue
+                self.images.append(file)
+                self.image_sources[file] = source_path
         self.images.sort()
+        self.report(f"Loaded {len(self.images)} image/video files.")
 
     def load_thumbnails(self):
-        print("Loading Thumbnails\n")
-        for _, _, files in  os.walk(THUMBNAILS_PATH):
+        self.report("Loading existing thumbnails...")
+        for _, _, files in  os.walk(self.thumbnails_path):
             for file in files:
-                self.thumbnails.append(file)
+                original_file = self.get_original_file_for_thumbnail(file)
+                if original_file in self.image_sources:
+                    self.thumbnails.append(file)
         self.thumbnails.sort(reverse=True)
+        self.report(f"Loaded {len(self.thumbnails)} existing thumbnails.")
 
     def create_thumbnails(self):
-        if len(self.images) > len(self.thumbnails):
-            print("Creating Thumbnails")
-            for image in self.images:
-                name, ext = os.path.splitext(image)
-                # Check for both regular image and video thumbnail
-                thumbnail_exists = (
-                    image in self.thumbnails or  # Regular image
-                    (ext.lower() == '.mp4' and f"{name}_video.jpg" in self.thumbnails)  # Video thumbnail
-                )
-                if not thumbnail_exists:
-                    self.create_thumbnail(image)
-            self.thumbnails.sort(reverse=True)
+        missing_images = []
+        for image in self.images:
+            name, ext = os.path.splitext(image)
+            # Check for both regular image and video thumbnail
+            thumbnail_exists = (
+                image in self.thumbnails or  # Regular image
+                (ext.lower() == '.mp4' and f"{name}_video.jpg" in self.thumbnails)  # Video thumbnail
+            )
+            if not thumbnail_exists:
+                missing_images.append(image)
+
+        if not missing_images:
+            self.report("All thumbnails are already available.", 1, 1)
+            return
+
+        total = len(missing_images)
+        for index, image in enumerate(missing_images, start=1):
+            self.report(f"Creating thumbnail {index}/{total}: {image}", index, total)
+            self.create_thumbnail(image)
+        self.thumbnails.sort(reverse=True)
+        self.report(f"Finished creating {total} thumbnails.", total, total)
 
     def create_thumbnail(self, file):
         """Create thumbnail for both images and videos."""
@@ -101,8 +285,8 @@ class Gallery():
             self.create_image_thumbnail(full_path, name, file)
 
     def create_video_thumbnail(self, full_path, name, file):
-        thumbnail_path = os.path.join(THUMBNAILS_PATH, f"{name}_video.jpg")
-        print(f"Creating thumbnail for video {file} -> {name}_video.jpg")
+        thumbnail_path = os.path.join(self.thumbnails_path, f"{name}_video.jpg")
+        logging.info("Creating thumbnail for video %s -> %s_video.jpg", file, name)
         try:
             subprocess.run(['ffmpeg', '-i', full_path, '-vframes', '1', '-an',
                             '-ss', '0', '-y','-f', 'image2', thumbnail_path], 
@@ -130,13 +314,13 @@ class Gallery():
             self.thumbnails.append(f"{name}_video.jpg")
 
         except subprocess.CalledProcessError as e:
-            print(f"Error creating video thumbnail for {file}: {e.stderr.decode()}")
+            self.report(f"Error creating video thumbnail for {file}: {e.stderr.decode()}")
         except Exception as e:
-            print(f"Error processing video thumbnail for {file}: {e}")
+            self.report(f"Error processing video thumbnail for {file}: {e}")
 
     def create_image_thumbnail(self, full_path, name, file):
-        thumbnail_path = os.path.join(THUMBNAILS_PATH, file)
-        print(f"Creating thumbnail for image {file}")
+        thumbnail_path = os.path.join(self.thumbnails_path, file)
+        logging.info("Creating thumbnail for image %s", file)
         try:
             img = Image.open(full_path)
             exif = img._getexif()
@@ -152,28 +336,29 @@ class Gallery():
             cropped_thumbnail.save(thumbnail_path)
             self.thumbnails.append(file)
         except Exception as e:
-            print(f"Error creating image thumbnail for {file}: {e}")
+            self.report(f"Error creating image thumbnail for {file}: {e}")
 
 
 class App(Gtk.Application):
-    def __init__(self):
+    def __init__(self, args):
         super().__init__()
         GLib.set_application_name("Gallery Time")
-        self.gallery = Gallery()
+        self.args = args
 
     def do_activate(self):
         """Called when the application is activated."""
-        window = MainWindow(self, self.gallery)
+        window = MainWindow(self)
         window.present()
+        window.load_gallery_async()
 
 
 class MainWindow(Gtk.ApplicationWindow):
-    def __init__(self, app, gallery):
+    def __init__(self, app):
         super().__init__(application=app)
         self.set_title("Gallery Time")
         self.set_default_size(800, 600)
 
-        self.gallery = gallery
+        self.gallery = None
         self.month_labels = {}
         self.year_labels = {}
 
@@ -208,11 +393,114 @@ class MainWindow(Gtk.ApplicationWindow):
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.scroll.set_child(self.main_box)
 
-        # Initialize the gallery view
+        self.show_loading_view()
+
+    def show_loading_view(self):
+        loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        loading_box.set_margin_top(48)
+        loading_box.set_margin_bottom(48)
+        loading_box.set_margin_start(32)
+        loading_box.set_margin_end(32)
+
+        title = Gtk.Label()
+        title.set_xalign(0)
+        title.set_markup("<b><span size='16000'>Loading Gallery Time</span></b>")
+        loading_box.append(title)
+
+        self.loading_label = Gtk.Label(label="Starting...")
+        self.loading_label.set_xalign(0)
+        self.loading_label.set_wrap(True)
+        loading_box.append(self.loading_label)
+
+        self.loading_progress = Gtk.ProgressBar()
+        self.loading_progress.set_show_text(True)
+        self.loading_progress.set_text("Preparing")
+        loading_box.append(self.loading_progress)
+
+        log_label = Gtk.Label(label=f"Log: {LOG_PATH}")
+        log_label.set_xalign(0)
+        log_label.set_wrap(True)
+        loading_box.append(log_label)
+
+        self.main_box.append(loading_box)
+
+    def clear_container(self, container):
+        child = container.get_first_child()
+        while child:
+            next_child = child.get_next_sibling()
+            container.remove(child)
+            child = next_child
+
+    def update_loading_status(self, message, current=None, total=None):
+        self.loading_label.set_text(message)
+        if current is not None and total:
+            fraction = min(max(current / total, 0), 1)
+            self.loading_progress.set_fraction(fraction)
+            self.loading_progress.set_text(f"{current}/{total}")
+        else:
+            self.loading_progress.pulse()
+            self.loading_progress.set_text("Working")
+        return False
+
+    def load_gallery_async(self):
+        def progress(message, current=None, total=None):
+            GLib.idle_add(self.update_loading_status, message, current, total)
+
+        def worker():
+            try:
+                gallery = build_gallery(self.get_application().args, progress)
+            except Exception as error:
+                logging.exception("Failed to load gallery")
+                GLib.idle_add(self.show_load_error, str(error), traceback.format_exc())
+                return
+
+            GLib.idle_add(self.show_gallery, gallery)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_gallery(self, gallery):
+        self.gallery = gallery
+        self.clear_container(self.main_box)
+        self.clear_container(self.sidebar)
+        self.month_labels.clear()
+        self.year_labels.clear()
         self.initialize_gallery(gallery)
+        return False
+
+    def show_load_error(self, message, details):
+        self.clear_container(self.main_box)
+
+        error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        error_box.set_margin_top(48)
+        error_box.set_margin_start(32)
+        error_box.set_margin_end(32)
+
+        title = Gtk.Label()
+        title.set_xalign(0)
+        title.set_markup("<b><span size='16000'>Could not load gallery</span></b>")
+        error_box.append(title)
+
+        message_label = Gtk.Label(label=message)
+        message_label.set_xalign(0)
+        message_label.set_wrap(True)
+        error_box.append(message_label)
+
+        log_label = Gtk.Label(label=f"Details were written to {LOG_PATH}")
+        log_label.set_xalign(0)
+        log_label.set_wrap(True)
+        error_box.append(log_label)
+
+        self.main_box.append(error_box)
+        return False
 
     def initialize_gallery(self, gallery):
         """Initialize the gallery view with the first image and process all images."""
+        if not gallery.thumbnails:
+            empty_label = Gtk.Label(label="No images found")
+            empty_label.set_margin_top(40)
+            self.main_box.append(empty_label)
+            return
+
         # Initialize with first image
         current_year = gallery.get_year(gallery.thumbnails[0])
         current_month = gallery.get_month(gallery.thumbnails[0])
@@ -297,37 +585,34 @@ class MainWindow(Gtk.ApplicationWindow):
             image_box.insert(container, -1)
 
         except Exception as e:
-            print(f"Error adding image {image}: {e}")
+            logging.exception("Error adding image %s: %s", image, e)
 
     def on_image_clicked(self, gesture, n_press, x, y, image):
         """Handle image/video click by opening in the default viewer."""
         try:
             name, ext = os.path.splitext(image)
-
-            # Check if this is a video thumbnail
-            if name.endswith('_video'):
-                # Remove _video suffix and add .mp4 extension
-                original_name = name[:-6] + '.mp4'
-                full_path = self.gallery.get_full_path(original_name)
-            else:
-                full_path = self.gallery.get_full_path(image)
+            original_name = self.gallery.get_original_file_for_thumbnail(image)
+            _, original_ext = os.path.splitext(original_name)
+            full_path = self.gallery.get_full_path(original_name)
 
             # Get clean name for year/month/day (remove _video if present)
             clean_name = name[:-6] if name.endswith('_video') else name
             year = self.gallery.get_year(clean_name)
             month = self.gallery.get_month(clean_name)
             day = clean_name[6:8]
-            print(f"Opening file: (Year: {year}, Month: {month} Day: {day})")
+            logging.info("Opening file: Year %s, Month %s, Day %s", year, month, day)
 
-            # Open file with system default application, redirecting output to /dev/null
+            open_command = "xdg-open" if self.gallery.is_video(original_ext) else "imv-dir"
+
+            # Open file with the configured viewer, redirecting output to /dev/null
             with open(os.devnull, 'w') as devnull:
                 subprocess.Popen(
-                    ["xdg-open", full_path],
+                    [open_command, full_path],
                     stdout=devnull,
                     stderr=devnull
                 )
         except Exception as e:
-            print(f"Error opening file {image}: {e}")
+            logging.exception("Error opening file %s: %s", image, e)
 
     def get_month_key(self, year, month):
         """Create a consistent key for the month_labels dictionary."""
@@ -342,7 +627,7 @@ class MainWindow(Gtk.ApplicationWindow):
             (_, y) = month_label.translate_coordinates(self, 0, vadjustment.get_value())
             vadjustment.set_value(y - SCROLL_OFFSET)
         except Exception as e:
-            print(f"Error scrolling to month: {e}")
+            logging.exception("Error scrolling to month: %s", e)
 
     def on_year_clicked(self, gesture, n_press, x, y, year):
         """Handle year click events by scrolling to the year's position."""
@@ -352,7 +637,7 @@ class MainWindow(Gtk.ApplicationWindow):
             (_, y) = year_label.translate_coordinates(self, 0, vadjustment.get_value())
             vadjustment.set_value(y - SCROLL_OFFSET)
         except Exception as e:
-            print(f"Error scrolling to year: {e}")
+            logging.exception("Error scrolling to year: %s", e)
 
     def create_image_box(self):
         image_box = Gtk.FlowBox()
@@ -405,6 +690,24 @@ class MainWindow(Gtk.ApplicationWindow):
         month_row.set_child(month_label)
         return month_row
 
+def build_gallery(args, progress_callback=None):
+    if args.nextcloud_url:
+        image_source = NextcloudImageSource(
+            args.nextcloud_url,
+            args.nextcloud_user,
+            args.nextcloud_password,
+            args.download_path,
+        )
+        thumbnails_path = args.thumbnail_path or DEFAULT_THUMBNAILS_PATH
+    else:
+        image_source = LocalImageSource(args.base_path)
+        thumbnails_path = args.thumbnail_path or os.path.join(image_source.base_path, IGNORE_PATH)
+
+    return Gallery(image_source, thumbnails_path, progress_callback)
+
+
 if __name__ == "__main__":
-    app = App()
+    args = parse_args()
+    setup_logging()
+    app = App(args)
     app.run()

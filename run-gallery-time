@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="/home/filipe/Projects/GalleryTime"
+MOUNT_DIR="${GALLERY_TIME_MOUNT_DIR:-$HOME/PhotosServer}"
+REMOTE_PATH="${GALLERY_TIME_REMOTE_PATH:-server@100.75.222.29:/mnt/storage/nextcloud/admin/files}"
+THUMBNAIL_PATH="${GALLERY_TIME_THUMBNAIL_PATH:-$HOME/.cache/gallery-time/thumbnails}"
+
+notify() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "Gallery Time" "$1"
+    else
+        printf 'Gallery Time: %s\n' "$1" >&2
+    fi
+}
+
+mkdir -p "$MOUNT_DIR" "$THUMBNAIL_PATH"
+
+if ! mountpoint -q "$MOUNT_DIR"; then
+    if ! command -v sshfs >/dev/null 2>&1; then
+        notify "sshfs is not installed. Mount $MOUNT_DIR first or install sshfs."
+        exit 1
+    fi
+
+    if ! sshfs "$REMOTE_PATH" "$MOUNT_DIR" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,ro; then
+        notify "Could not mount $REMOTE_PATH. Check SSH access or mount it manually."
+        exit 1
+    fi
+fi
+
+cd "$PROJECT_DIR"
+exec python3 gallery_time.py --base-path "$MOUNT_DIR" --thumbnail-path "$THUMBNAIL_PATH"

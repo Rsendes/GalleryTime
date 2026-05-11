@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Gallery Time
+Comment=Browse photos and videos by date
+Exec=/home/filipe/Projects/GalleryTime/run-gallery-time
+Path=/home/filipe/Projects/GalleryTime
+Icon=/home/filipe/Projects/GalleryTime/icons/icon.png
+Terminal=false
+Categories=Graphics;Photography;
+StartupNotify=true
