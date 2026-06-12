@@ -5,6 +5,7 @@ import argparse
 import base64
 import logging
 import posixpath
+import re
 import sys
 import threading
 import traceback
@@ -40,6 +41,10 @@ IGNORE_PATH = "Thumbnails"
 ICONS_PATH = os.path.join(os.path.dirname(__file__), "icons")  # Add this line
 
 THUMBNAIL_SIZE = (300, 300)
+MAX_IMAGES_PER_ROW = 6
+IMAGE_GRID_COLUMN_SPACING = 24
+IMAGE_GRID_ROW_SPACING = 8
+IMAGE_GRID_SIDE_MARGIN = 12
 
 ICON_SIZE = (32, 32)
 
@@ -48,6 +53,7 @@ SCROLL_OFFSET = 60
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff'}
 VIDEO_EXTENSIONS = {'.mp4'}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+DATE_PATTERN = re.compile(r"(20\d{6})")
 
 
 def setup_logging():
@@ -197,20 +203,35 @@ class Gallery():
         if self.progress_callback:
             self.progress_callback(message, current, total)
 
+    def get_date_key(self, file):
+        name = os.path.splitext(file)[0]
+        match = DATE_PATTERN.search(name)
+        if not match:
+            return None
+        return match.group(1)
+
     def is_valid(self, file):
-        name, ext = os.path.splitext(file)
-        return (
-            len(name) >= 6
-            and name[:6].isdigit()
-            and name[:2] == "20"
-            and ext.lower() in SUPPORTED_EXTENSIONS
-        )
+        _, ext = os.path.splitext(file)
+        return ext.lower() in SUPPORTED_EXTENSIONS and self.get_date_key(file) is not None
 
     def get_year(self, file):
-        return int(file[:4])
+        return int(self.get_date_key(file)[:4])
 
     def get_month(self, file):
-        return int(file[4:6])
+        return int(self.get_date_key(file)[4:6])
+
+    def get_day(self, file):
+        return self.get_date_key(file)[6:8]
+
+    def get_display_date(self, file):
+        date_key = self.get_date_key(file)
+        if not date_key:
+            return "Unknown date"
+
+        year = int(date_key[:4])
+        month = int(date_key[4:6])
+        day = int(date_key[6:8])
+        return f"{day} {MONTH_NAMES[month]} {year}"
 
     def is_video(self, ext):
         return ext.lower() in VIDEO_EXTENSIONS
@@ -237,7 +258,7 @@ class Gallery():
                     continue
                 self.images.append(file)
                 self.image_sources[file] = source_path
-        self.images.sort()
+        self.images.sort(key=self.get_date_key)
         self.report(f"Loaded {len(self.images)} image/video files.")
 
     def load_thumbnails(self):
@@ -247,7 +268,7 @@ class Gallery():
                 original_file = self.get_original_file_for_thumbnail(file)
                 if original_file in self.image_sources:
                     self.thumbnails.append(file)
-        self.thumbnails.sort(reverse=True)
+        self.thumbnails.sort(key=self.get_date_key, reverse=True)
         self.report(f"Loaded {len(self.thumbnails)} existing thumbnails.")
 
     def create_thumbnails(self):
@@ -270,7 +291,7 @@ class Gallery():
         for index, image in enumerate(missing_images, start=1):
             self.report(f"Creating thumbnail {index}/{total}: {image}", index, total)
             self.create_thumbnail(image)
-        self.thumbnails.sort(reverse=True)
+        self.thumbnails.sort(key=self.get_date_key, reverse=True)
         self.report(f"Finished creating {total} thumbnails.", total, total)
 
     def create_thumbnail(self, file):
@@ -361,6 +382,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.gallery = None
         self.month_labels = {}
         self.year_labels = {}
+        self.image_widgets = {}
+        self.external_viewer_anchor = None
 
         # Cache video icon
         self.video_icon = Gtk.Image.new_from_file(os.path.join(ICONS_PATH, "video-icon.png"))
@@ -388,6 +411,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Scroll and main container
         self.scroll = Gtk.ScrolledWindow()
         self.scroll.set_hexpand(True)
+        self.scroll.get_vadjustment().connect("changed", self.on_scroll_adjustment_changed)
         hbox.append(self.scroll)
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -464,6 +488,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.clear_container(self.sidebar)
         self.month_labels.clear()
         self.year_labels.clear()
+        self.image_widgets.clear()
         self.initialize_gallery(gallery)
         return False
 
@@ -568,6 +593,7 @@ class MainWindow(Gtk.ApplicationWindow):
             container = Gtk.Overlay()
 
             container.set_size_request(THUMBNAIL_SIZE[0], THUMBNAIL_SIZE[1])
+            container.set_tooltip_text(gallery.get_display_date(image))
 
             # Add main image
             image_path = gallery.get_thumbnail_path(image)
@@ -579,16 +605,124 @@ class MainWindow(Gtk.ApplicationWindow):
 
             container.set_child(image_widget)
 
+            day_label = Gtk.Label(label=gallery.get_day(image))
+            day_label.set_halign(Gtk.Align.END)
+            day_label.set_valign(Gtk.Align.START)
+            day_label.set_margin_top(8)
+            day_label.set_margin_end(8)
+            day_label.set_markup(f"<b>{gallery.get_day(image)}</b>")
+            day_label.add_css_class("caption")
+            day_label.add_css_class("osd")
+            day_label.set_visible(False)
+            container.add_overlay(day_label)
+
+            motion = Gtk.EventControllerMotion.new()
+            motion.connect("enter", self.on_image_hover_enter, day_label)
+            motion.connect("leave", self.on_image_hover_leave, day_label)
+            container.add_controller(motion)
+
             gesture = Gtk.GestureClick.new()
             gesture.connect("pressed", self.on_image_clicked, image)
             container.add_controller(gesture)
             image_box.insert(container, -1)
+            self.image_widgets[image] = container
 
         except Exception as e:
             logging.exception("Error adding image %s: %s", image, e)
 
+    def on_image_hover_enter(self, controller, x, y, day_label):
+        day_label.set_visible(True)
+
+    def on_image_hover_leave(self, controller, day_label):
+        day_label.set_visible(False)
+
+    def capture_scroll_anchor(self):
+        """Remember the thumbnail nearest the viewport top before layout changes."""
+        if not self.gallery:
+            return None
+
+        vadjustment = self.scroll.get_vadjustment()
+        scroll_top = vadjustment.get_value()
+        viewport_height = vadjustment.get_page_size()
+        best_anchor = None
+        best_distance = None
+
+        for image in self.gallery.thumbnails:
+            widget = self.image_widgets.get(image)
+            if not widget:
+                continue
+
+            coordinates = widget.translate_coordinates(self.main_box, 0, 0)
+            if coordinates is None:
+                continue
+
+            _, widget_y = coordinates
+            relative_y = widget_y - scroll_top
+            if relative_y + widget.get_height() < 0 or relative_y > viewport_height:
+                continue
+
+            distance = abs(relative_y)
+            if best_distance is None or distance < best_distance:
+                best_anchor = (image, relative_y)
+                best_distance = distance
+
+        return best_anchor
+
+    def restore_scroll_anchor(self, anchor):
+        if not anchor:
+            return False
+
+        image, relative_y = anchor
+        widget = self.image_widgets.get(image)
+        if not widget:
+            return False
+
+        coordinates = widget.translate_coordinates(self.main_box, 0, 0)
+        if coordinates is None:
+            return False
+
+        _, widget_y = coordinates
+        vadjustment = self.scroll.get_vadjustment()
+        target = widget_y - relative_y
+        upper = vadjustment.get_upper() - vadjustment.get_page_size()
+        target = min(max(target, vadjustment.get_lower()), max(upper, vadjustment.get_lower()))
+        vadjustment.set_value(target)
+        return False
+
+    def schedule_scroll_anchor_restore(self, anchor):
+        if not anchor:
+            return
+
+        for delay in (150, 400, 900):
+            GLib.timeout_add(delay, self.restore_scroll_anchor, anchor)
+
+    def on_scroll_adjustment_changed(self, adjustment):
+        if self.external_viewer_anchor:
+            self.schedule_scroll_anchor_restore(self.external_viewer_anchor)
+
+    def clear_external_viewer_anchor(self):
+        self.external_viewer_anchor = None
+        return False
+
+    def watch_external_viewer(self, process):
+        if process.poll() is None:
+            return True
+
+        self.schedule_scroll_anchor_restore(self.external_viewer_anchor)
+        GLib.timeout_add(1500, self.clear_external_viewer_anchor)
+        return False
+
+    def track_external_viewer(self, anchor, process):
+        if not anchor:
+            return
+
+        self.external_viewer_anchor = anchor
+        self.schedule_scroll_anchor_restore(anchor)
+        GLib.timeout_add(500, self.watch_external_viewer, process)
+
     def on_image_clicked(self, gesture, n_press, x, y, image):
         """Handle image/video click by opening in the default viewer."""
+        scroll_anchor = self.capture_scroll_anchor()
         try:
             name, ext = os.path.splitext(image)
             original_name = self.gallery.get_original_file_for_thumbnail(image)
@@ -599,18 +733,19 @@ class MainWindow(Gtk.ApplicationWindow):
             clean_name = name[:-6] if name.endswith('_video') else name
             year = self.gallery.get_year(clean_name)
             month = self.gallery.get_month(clean_name)
-            day = clean_name[6:8]
+            day = self.gallery.get_day(clean_name)
             logging.info("Opening file: Year %s, Month %s, Day %s", year, month, day)
 
             open_command = "xdg-open" if self.gallery.is_video(original_ext) else "imv-dir"
 
             # Open file with the configured viewer, redirecting output to /dev/null
             with open(os.devnull, 'w') as devnull:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     [open_command, full_path],
                     stdout=devnull,
                     stderr=devnull
                 )
+            self.track_external_viewer(scroll_anchor, process)
         except Exception as e:
             logging.exception("Error opening file %s: %s", image, e)
 
@@ -641,7 +776,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def create_image_box(self):
         image_box = Gtk.FlowBox()
-        image_box.set_max_children_per_line(5)
+        image_box.set_halign(Gtk.Align.CENTER)
+        image_box.set_max_children_per_line(MAX_IMAGES_PER_ROW)
+        image_box.set_column_spacing(IMAGE_GRID_COLUMN_SPACING)
+        image_box.set_row_spacing(IMAGE_GRID_ROW_SPACING)
+        image_box.set_margin_start(IMAGE_GRID_SIDE_MARGIN)
+        image_box.set_margin_end(IMAGE_GRID_SIDE_MARGIN)
         image_box.set_selection_mode(Gtk.SelectionMode.NONE)
         return image_box 
 
